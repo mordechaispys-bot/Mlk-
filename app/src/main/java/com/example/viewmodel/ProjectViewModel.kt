@@ -15,10 +15,140 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.InetSocketAddress
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.io.PrintWriter
+import java.nio.charset.StandardCharsets
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody
+import okhttp3.MediaType
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
 
 class ProjectViewModel(application: Application) : AndroidViewModel(application) {
     private val database = AppDatabase.getDatabase(application)
     private val repository = ProjectRepository(database.projectDao())
+
+    private val activeServers = java.util.concurrent.ConcurrentHashMap<Int, kotlinx.coroutines.Job>()
+
+    init {
+        viewModelScope.launch {
+            allProjects.collect { projects ->
+                val activePorts = projects.filter { it.status == "ACTIVE" }.map { 
+                    3000 + (it.subdomain.hashCode().coerceAtLeast(0) % 5000)
+                }.toSet()
+                
+                val currentServers = activeServers.keys.toSet()
+                currentServers.forEach { port ->
+                    if (!activePorts.contains(port)) {
+                        stopLocalSocketServer(port)
+                    }
+                }
+                
+                projects.forEach { proj ->
+                    if (proj.status == "ACTIVE") {
+                        val port = 3000 + (proj.subdomain.hashCode().coerceAtLeast(0) % 5000)
+                        startLocalSocketServer(port, proj)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun startLocalSocketServer(port: Int, project: Project) {
+        if (activeServers.containsKey(port)) return
+        
+        val job = viewModelScope.launch(Dispatchers.IO) {
+            var serverSocket: ServerSocket? = null
+            try {
+                serverSocket = ServerSocket(port)
+                while (coroutineContext[kotlinx.coroutines.Job]?.isActive == true) {
+                    val socket = try {
+                        serverSocket.accept()
+                    } catch (e: Exception) {
+                        break
+                    }
+                    
+                    launch(Dispatchers.IO) {
+                        try {
+                            val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
+                            val writer = PrintWriter(socket.getOutputStream(), true)
+                            
+                            val reqLines = mutableListOf<String>()
+                            var line: String? = reader.readLine()
+                            while (line != null && line.trim().isNotEmpty()) {
+                                reqLines.add(line)
+                                line = reader.readLine()
+                            }
+                            
+                            if (reqLines.isEmpty()) {
+                                socket.close()
+                                return@launch
+                            }
+                            
+                            val firstLine = reqLines[0]
+                            val parts = firstLine.split(" ")
+                            val method = parts.getOrNull(0) ?: "GET"
+                            val fullPath = parts.getOrNull(1) ?: "/"
+                            
+                            val endpoints = parseEndpoints(project.backendEndpointsJson)
+                            val path = fullPath.substringBefore("?")
+                            
+                            val matched = endpoints.firstOrNull { 
+                                it["path"] == path || it["path"] == "/$path" || "/${it["path"]}" == path 
+                            } ?: endpoints.firstOrNull { path.startsWith(it["path"] ?: "---") }
+                            
+                            val responseBody = if (matched != null) {
+                                matched["sampleResponse"] ?: "{}"
+                            } else {
+                                val err = JSONObject()
+                                err.put("status", "error")
+                                err.put("message", "404 Route Not Found")
+                                err.put("requested_path", path)
+                                val available = JSONArray()
+                                endpoints.forEach { available.put(it["path"]) }
+                                err.put("available_routes", available)
+                                err.toString()
+                            }
+                            
+                            writer.println("HTTP/1.1 200 OK")
+                            writer.println("Content-Type: application/json; charset=utf-8")
+                            writer.println("Access-Control-Allow-Origin: *")
+                            writer.println("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS")
+                            writer.println("Access-Control-Allow-Headers: *")
+                            writer.println("Content-Length: ${responseBody.toByteArray(StandardCharsets.UTF_8).size}")
+                            writer.println("Connection: close")
+                            writer.println()
+                            writer.println(responseBody)
+                            writer.flush()
+                        } catch (e: java.io.IOException) {
+                            // Suppressed socket error
+                        } finally {
+                            try { socket.close() } catch (e: Exception) {}
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                // Suppressed server socket error
+            } finally {
+                try { serverSocket?.close() } catch (e: Exception) {}
+            }
+        }
+        activeServers[port] = job
+    }
+
+    private fun stopLocalSocketServer(port: Int) {
+        activeServers.remove(port)?.cancel()
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        activeServers.keys.toSet().forEach { stopLocalSocketServer(it) }
+    }
 
     val allProjects: StateFlow<List<Project>> = repository.allProjects
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -307,7 +437,7 @@ class ProjectViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             _sandboxLoading.value = true
             _sandboxResponse.value = null
-            delay(1000) // Aesthetic network latency simulation for container
+            delay(500) // Small delay for visual response
 
             val selected = selectedProject.value
             if (selected == null) {
@@ -316,39 +446,66 @@ class ProjectViewModel(application: Application) : AndroidViewModel(application)
                 return@launch
             }
 
-            val endpoints = parseEndpoints(selected.backendEndpointsJson)
-            val matched = endpoints.firstOrNull { it["path"] == endpointName }
-            if (matched != null) {
-                // If it exists, let's create a beautiful custom mock response reflecting input variables!
-                val sample = matched["sampleResponse"] ?: "{}"
-                
-                // Customize response based on inputs
-                val inputJson = try { JSONObject(body) } catch (e: Exception) { null }
-                val outputObj = try { JSONObject(sample) } catch (e: Exception) { JSONObject() }
+            if (selected.status != "ACTIVE") {
+                _sandboxResponse.value = """
+                    {
+                      "error": "Connection Refused",
+                      "host": "127.0.0.1",
+                      "port": ${3000 + (selected.subdomain.hashCode().coerceAtLeast(0) % 5000)},
+                      "details": "Local developer container is STOPPED. Please click 'START POD' to boot the service socket."
+                    }
+                """.trimIndent()
+                _sandboxLoading.value = false
+                return@launch
+            }
 
-                if (inputJson != null) {
-                    val keys = inputJson.keys()
-                    while(keys.hasNext()) {
-                        val key = keys.next()
-                        if (outputObj.has(key)) {
-                            outputObj.put(key, inputJson.get(key))
+            val localPort = 3000 + (selected.subdomain.hashCode().coerceAtLeast(0) % 5000)
+            
+            // Execute actual network request to the real unprivileged local port!
+            val responseText = withContext(Dispatchers.IO) {
+                try {
+                    val client = OkHttpClient.Builder()
+                        .connectTimeout(2, java.util.concurrent.TimeUnit.SECONDS)
+                        .readTimeout(2, java.util.concurrent.TimeUnit.SECONDS)
+                        .build()
+
+                    val url = "http://127.0.0.1:$localPort$endpointName"
+                    val requestBuilder = Request.Builder().url(url)
+                    
+                    if (method == "POST" || method == "PUT") {
+                        val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
+                        val reqBody = body.toRequestBody(mediaType)
+                        if (method == "POST") requestBuilder.post(reqBody) else requestBuilder.put(reqBody)
+                    } else if (method == "DELETE") {
+                        requestBuilder.delete()
+                    } else {
+                        requestBuilder.get()
+                    }
+
+                    client.newCall(requestBuilder.build()).execute().use { response ->
+                        if (response.isSuccessful) {
+                            response.body?.string() ?: "{}"
+                        } else {
+                            JSONObject().apply {
+                                put("status", "error")
+                                put("code", response.code)
+                                put("message", response.message)
+                            }.toString(2)
                         }
                     }
+                } catch (e: Exception) {
+                    JSONObject().apply {
+                        put("error", "Connection Refused")
+                        put("host", "127.0.0.1")
+                        put("port", localPort)
+                        put("exception", e.javaClass.simpleName)
+                        put("message", e.localizedMessage ?: "Connection reset by peer")
+                        put("troubleshoot", "Verify that Gancode unprivileged container daemon has started successfully.")
+                    }.toString(2)
                 }
-                
-                // Add metadata injection for realism
-                outputObj.put("_container_meta", JSONObject().apply {
-                    put("node", "aws-west-gancode-04")
-                    put("latency_ms", "28ms")
-                    put("engine_version", "v1.2.5")
-                    put("timestamp_utc", "2026-06-11T09:27:00Z")
-                    put("powered_by", "Gancode AI Studio")
-                })
-
-                _sandboxResponse.value = outputObj.toString(2)
-            } else {
-                _sandboxResponse.value = "{ \"error\": \"404 Not Found\", \"path\": \"$endpointName\" }"
             }
+
+            _sandboxResponse.value = responseText
             _sandboxLoading.value = false
         }
     }

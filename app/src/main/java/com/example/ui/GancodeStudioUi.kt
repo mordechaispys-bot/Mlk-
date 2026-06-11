@@ -1954,12 +1954,29 @@ fun NetworkDnsScreen(viewModel: ProjectViewModel) {
                                 isTestingPort = true
                                 testingPortStatus = ""
                                 scope.launch {
-                                    delay(800) // virtual network scan latency
-                                    val checkedPort = portTesterInput.trim()
-                                    testingPortStatus = if (lang == "he") {
-                                        "פורט $checkedPort: פעיל ופתוח למעבר מידע (127.0.0.1 Binding OK)"
+                                    val portInt = portTesterInput.trim().toIntOrNull() ?: 3000
+                                    val isOnline = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                        try {
+                                            val testSocket = java.net.Socket()
+                                            testSocket.connect(java.net.InetSocketAddress("127.0.0.1", portInt), 500)
+                                            testSocket.close()
+                                            true
+                                        } catch (e: Exception) {
+                                            false
+                                        }
+                                    }
+                                    testingPortStatus = if (isOnline) {
+                                        if (lang == "he") {
+                                            "פורט $portInt: פעיל ומגיב! (127.0.0.1 Connection Successful)"
+                                        } else {
+                                            "Port $portInt: ONLINE - TCP socket listening successfully (127.0.0.1 Binding OK)"
+                                        }
                                     } else {
-                                        "Port $checkedPort: ONLINE - Socket listening successfully (127.0.0.1 Binding OK)"
+                                        if (lang == "he") {
+                                            "פורט $portInt: סגור או לא פעיל בקונטיינר. (Connection Refused)"
+                                        } else {
+                                            "Port $portInt: OFFLINE - Connection Refused / No active socket listening."
+                                        }
                                     }
                                     isTestingPort = false
                                 }

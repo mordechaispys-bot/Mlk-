@@ -51,6 +51,107 @@ class ProjectViewModel(application: Application) : AndroidViewModel(application)
     // Search & filter
     val searchQuery = MutableStateFlow("")
 
+    // Bilingual Support
+    private val _language = MutableStateFlow("en") // "en" or "he"
+    val language: StateFlow<String> = _language.asStateFlow()
+
+    fun toggleLanguage() {
+        _language.value = if (_language.value == "en") "he" else "en"
+    }
+
+    // Google / Email Sign-In simulation states
+    private val _isUserLoggedIn = MutableStateFlow(false)
+    val isUserLoggedIn: StateFlow<Boolean> = _isUserLoggedIn.asStateFlow()
+
+    private val _userEmail = MutableStateFlow("mrdkyspys55@gmail.com")
+    val userEmail: StateFlow<String> = _userEmail.asStateFlow()
+
+    private val _userName = MutableStateFlow("mrdkyspys55")
+    val userName: StateFlow<String> = _userName.asStateFlow()
+
+    fun loginUser(email: String, name: String = "") {
+        _userEmail.value = email.trim().ifEmpty { "mrdkyspys55@gmail.com" }
+        _userName.value = if (name.trim().isNotEmpty()) name else email.split("@").first()
+        _isUserLoggedIn.value = true
+    }
+
+    fun logoutUser() {
+        _isUserLoggedIn.value = false
+    }
+
+    // PostgreSQL Console Shell Simulator
+    private val _dbConsoleOutput = MutableStateFlow("-- PostgreSQL database terminal ready.\n-- Running queries locally in container context.\n-- Try: SELECT * FROM tables\n-- Or: SELECT * FROM members")
+    val dbConsoleOutput: StateFlow<String> = _dbConsoleOutput.asStateFlow()
+
+    fun executeSql(query: String) {
+        viewModelScope.launch {
+            if (query.trim().isEmpty()) return@launch
+            _dbConsoleOutput.value = "Executing: $query on local postgres instance..."
+            delay(500)
+            val lowercase = query.lowercase(Locale.ROOT)
+            if (lowercase.contains("select * from tables") || lowercase.contains("show tables")) {
+                val tables = selectedProject.value?.let { parseSchema(it.databaseSchemaJson) } ?: emptyList()
+                if (tables.isEmpty()) {
+                    _dbConsoleOutput.value = "postgres=# SELECT * FROM tables;\n(0 rows) - No local database tables configured yet."
+                } else {
+                    val sb = StringBuilder("postgres=# SELECT * FROM tables;\n")
+                    sb.append(String.format(Locale.ROOT, "%-16s | %-32s\n", "TABLE NAME", "COLUMN DEFINITIONS"))
+                    sb.append("-----------------+----------------------------------------------------\n")
+                    tables.forEach { tableMap ->
+                        val tableName = tableMap["table"] as? String ?: "unknown"
+                        @Suppress("UNCHECKED_CAST")
+                        val cols = tableMap["columns"] as? List<Map<String, String>> ?: emptyList()
+                        val colStr = cols.joinToString(", ") { "${it["name"]}:${it["type"]}" }
+                        sb.append(String.format(Locale.ROOT, "%-16s | %-32s\n", tableName, colStr))
+                    }
+                    _dbConsoleOutput.value = sb.toString()
+                }
+            } else if (lowercase.contains("select") && (lowercase.contains("members") || lowercase.contains("workouts") || lowercase.contains("products") || lowercase.contains("orders") || lowercase.contains("slots") || lowercase.contains("appointments") || lowercase.contains("resources") || lowercase.contains("tasks"))) {
+                val records = when {
+                    lowercase.contains("members") -> """
+                     id |      email      |        created_at       
+                    ----+-----------------+-------------------------
+                      1 | user@gancode.ai | 2026-06-11 09:25:12.784
+                      2 | dem@example.com | 2026-06-11 09:41:03.112
+                    (2 rows)
+                    """.trimIndent()
+                    lowercase.contains("workouts") -> """
+                     id | member_id |      activity       | duration_mins 
+                    ----+-----------+---------------------+---------------
+                    101 |         1 | Morning Cardio Burn |            30
+                    102 |         2 | Hypertrophy Push    |            45
+                    (2 rows)
+                    """.trimIndent()
+                    lowercase.contains("products") -> """
+                     id |         title         | price_cents | stock_qty 
+                    ----+-----------------------+-------------+-----------
+                      1 | Minimalist Work Desk  |       24900 |        12
+                      2 | Ergonomic Mesh Chair  |       18900 |        34
+                    (2 rows)
+                    """.trimIndent()
+                    lowercase.contains("orders") -> """
+                     id |    invoice_ref    | total_cents |  status   
+                    ----+-------------------+-------------+-----------
+                    542 | inv_99812_checkout|       43800 | COMPLETED
+                    (1 row)
+                    """.trimIndent()
+                    else -> """
+                     id |       name       |  status  |  created_by   
+                    ----+------------------+----------+---------------
+                      1 | Asset Alpha Pro  | ACTIVE   | console_agent
+                      2 | Backup Sync-Daemon| COMPLETED| mrdkyspys55
+                    (2 rows)
+                    """.trimIndent()
+                }
+                _dbConsoleOutput.value = "postgres=# $query\n$records"
+            } else if (lowercase.contains("insert") || lowercase.contains("update") || lowercase.contains("delete")) {
+                _dbConsoleOutput.value = "postgres=# $query\nQuery executed successfully. Row affected: 1."
+            } else {
+                _dbConsoleOutput.value = "postgres=# $query\nERROR: relation does not exist or syntax error near \"${query.trim().split(" ").firstOrNull() ?: ""}\"\nTry running: 'SELECT * FROM tables' or select from one of the custom project tables listed above."
+            }
+        }
+    }
+
     val filteredProjects: StateFlow<List<Project>> = combine(allProjects, searchQuery) { list, query ->
         if (query.trim().isEmpty()) {
             list
@@ -135,7 +236,8 @@ class ProjectViewModel(application: Application) : AndroidViewModel(application)
             }
 
             // Phase 3: Simulated Container Provisioning
-            addLog("[CONTAINER] Creating remote terminal socket for ${projectDetails.subdomain}.gancode.ai")
+            val localPort = 3000 + (projectDetails.subdomain.hashCode().coerceAtLeast(0) % 5000)
+            addLog("[CONTAINER] Allocating local container slot, binding local interface socket at port :$localPort")
             delay(400)
             addLog("[DOCKER] pulling base system runtime for ${projectDetails.framework}...")
             delay(500)
@@ -162,7 +264,7 @@ class ProjectViewModel(application: Application) : AndroidViewModel(application)
             delay(500)
             addLog("[DB] Running default Schema scripts on Database connection...")
             delay(400)
-            addLog("[PROXY-DNS] Registering CNAME cloudflare redirect record: ${projectDetails.subdomain}.gancode.ai -> gancode.server")
+            addLog("[ROUTER] Local mapping established: http://127.0.0.1:$localPort and local network IP http://192.168.1.150:$localPort")
             delay(400)
             addLog("[SYSTEM] Booting application services inside container...")
             delay(500)

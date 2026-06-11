@@ -1,0 +1,6 @@
+{
+  "name": "Gancode AI Studio",
+  "description": "Cloud System Engine that builds and runs live backends, frontends, and containers from natural language ideas.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

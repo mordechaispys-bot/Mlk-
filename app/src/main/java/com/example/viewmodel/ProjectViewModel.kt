@@ -33,6 +33,9 @@ class ProjectViewModel(application: Application) : AndroidViewModel(application)
     private val database = AppDatabase.getDatabase(application)
     private val repository = ProjectRepository(database.projectDao())
 
+    val allProjects: StateFlow<List<Project>> = repository.allProjects
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     private val activeServers = java.util.concurrent.ConcurrentHashMap<Int, kotlinx.coroutines.Job>()
 
     init {
@@ -149,9 +152,6 @@ class ProjectViewModel(application: Application) : AndroidViewModel(application)
         super.onCleared()
         activeServers.keys.toSet().forEach { stopLocalSocketServer(it) }
     }
-
-    val allProjects: StateFlow<List<Project>> = repository.allProjects
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _selectedProject = MutableStateFlow<Project?>(null)
     val selectedProject: StateFlow<Project?> = _selectedProject.asStateFlow()
